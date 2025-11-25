@@ -291,6 +291,70 @@ if 'show_mapping' not in st.session_state:
     st.session_state.show_mapping = False
 if 'active_tab' not in st.session_state:
     st.session_state.active_tab = 0
+
+# Callback functions for widget state management (prevents feedback loops)
+def on_choice_change(idx, matches):
+    """Callback for choice selectbox changes - updates session state only when widget actually changes"""
+    choice_key = f"choice_{idx}"
+    manual_key = f"manual_{idx}"
+    choice = st.session_state.get(choice_key, 'Select...')
+    manual = st.session_state.get(manual_key, 'None')
+    st.session_state.user_selections[idx] = {
+        'choice': choice,
+        'manual': manual if manual != 'None' else None,
+        'fuzzy': matches['fuzzy'],
+        'llm': matches['llm']
+    }
+
+def on_manual_change(idx, matches):
+    """Callback for manual selectbox changes - updates session state only when widget actually changes"""
+    manual_key = f"manual_{idx}"
+    choice_key = f"choice_{idx}"
+    manual = st.session_state.get(manual_key, 'None')
+    choice = st.session_state.get(choice_key, 'Select...')
+    # If manual selection is made, auto-switch to Manual Override
+    if manual != 'None':
+        st.session_state.user_selections[idx] = {
+            'choice': 'Manual Override',
+            'manual': manual,
+            'fuzzy': matches['fuzzy'],
+            'llm': matches['llm']
+        }
+        # Update the choice widget key to reflect Manual Override
+        st.session_state[choice_key] = 'Manual Override'
+    else:
+        st.session_state.user_selections[idx] = {
+            'choice': choice,
+            'manual': None,
+            'fuzzy': matches['fuzzy'],
+            'llm': matches['llm']
+        }
+
+def initialize_user_selections(mapping_results, high_confidence_threshold, fuzzy_threshold):
+    """Pre-initialize all user selections before rendering to prevent jitter on first interaction"""
+    if not mapping_results:
+        return
+    for result in mapping_results:
+        idx = result['index']
+        if idx not in st.session_state.user_selections:
+            matches = result['matches']
+            # Calculate default choice based on confidence scores
+            if matches['fuzzy'] and matches['fuzzy']['score'] >= high_confidence_threshold:
+                default_choice = f"Fuzzy ({matches['fuzzy']['score']}%)"
+            elif matches['llm'] and 'error' not in matches['llm']:
+                default_choice = "AI Match"
+            elif matches['fuzzy'] and matches['fuzzy']['score'] >= fuzzy_threshold:
+                default_choice = f"Fuzzy ({matches['fuzzy']['score']}%)"
+            else:
+                default_choice = "Select..."
+
+            st.session_state.user_selections[idx] = {
+                'choice': default_choice,
+                'manual': None,
+                'fuzzy': matches['fuzzy'],
+                'llm': matches['llm']
+            }
+
 @st.cache_data
 def get_stable_cache_key():
     """Generate a stable cache key for the current session."""
@@ -2609,6 +2673,8 @@ def main():
                             st.success("Marked low confidence items as unmapped!")
                             st.rerun()
                     st.divider()
+                    # Pre-initialize all user selections before rendering to prevent jitter
+                    initialize_user_selections(st.session_state.mapping_results, high_confidence_threshold, fuzzy_threshold)
                     results_by_label = {}
                     for result in st.session_state.mapping_results:
                         label = result['label']
@@ -2654,12 +2720,14 @@ def main():
                                         st.write(f"Match: {fuzzy['match']}")
                                         st.write(f"Score: {fuzzy['score']}%")
                                         st.write(f"Mnemonic: **{fuzzy['mnemonic']}**")
+                                        # Use stable placeholder to prevent layout reflow/jitter
+                                        confidence_placeholder = st.empty()
                                         if fuzzy['score'] >= high_confidence_threshold:
-                                            st.success("High confidence")
+                                            confidence_placeholder.success("High confidence")
                                         elif fuzzy['score'] >= fuzzy_threshold:
-                                            st.warning("Medium confidence")
+                                            confidence_placeholder.warning("Medium confidence")
                                         else:
-                                            st.error("Below threshold")
+                                            confidence_placeholder.error("Below threshold")
                                         if fuzzy['score'] < high_confidence_threshold and fuzzy['alternatives']:
                                             st.caption("Alternatives:")
                                             for alt in fuzzy['alternatives']:
@@ -2702,10 +2770,22 @@ def main():
                                             f"{row['ACCOUNT']} → {row['MNEMONIC']}"
                                             for _, row in label_mnemonics.iterrows()
                                         ]
-                                    manual_selection = st.selectbox(
+                                    # Get stored manual selection for default index
+                                    stored_manual = st.session_state.user_selections.get(idx, {}).get('manual', None)
+                                    manual_default_idx = 0
+                                    if stored_manual:
+                                        # Find the matching option in manual_options
+                                        for opt_idx, opt in enumerate(manual_options):
+                                            if stored_manual in opt or opt.startswith(stored_manual):
+                                                manual_default_idx = opt_idx
+                                                break
+                                    st.selectbox(
                                         "Select manually",
                                         options=manual_options,
                                         key=f"manual_{idx}",
+                                        index=manual_default_idx,
+                                        on_change=on_manual_change,
+                                        args=(idx, matches),
                                         label_visibility="collapsed"
                                     )
                                 with cols[3]:
@@ -2715,37 +2795,31 @@ def main():
                                         choice_options.append(f"Fuzzy ({matches['fuzzy']['score']}%)")
                                     if matches['llm'] and 'error' not in matches['llm']:
                                         choice_options.append("AI Match")
-                                 
+
                                     # FIX 1: Make manual override a permanent option
                                     choice_options.append("Manual Override")
-                                 
+
                                     choice_options.append("Leave Unmapped")
                                     choice_options.append("Skip/Remove")
-                                    default_choice = 0
-                                    if idx in st.session_state.user_selections:
-                                        prev_choice = st.session_state.user_selections[idx]['choice']
-                                        if prev_choice in choice_options:
-                                            default_choice = choice_options.index(prev_choice)
+
+                                    # Get stored choice from session state (already pre-initialized)
+                                    stored_choice = st.session_state.user_selections.get(idx, {}).get('choice', 'Select...')
+                                    if stored_choice in choice_options:
+                                        default_choice = choice_options.index(stored_choice)
                                     else:
-                                        if matches['fuzzy'] and matches['fuzzy']['score'] >= high_confidence_threshold:
-                                            default_choice = 1
-                                        elif matches['llm'] and 'error' not in matches['llm']:
-                                            default_choice = 2 if "AI Match" in choice_options else default_choice
-                                        elif matches['fuzzy'] and matches['fuzzy']['score'] >= fuzzy_threshold:
-                                            default_choice = 1
-                                    final_choice = st.selectbox(
+                                        default_choice = 0
+
+                                    # Use callback to update session state only when widget changes
+                                    st.selectbox(
                                         "Choose mapping",
                                         options=choice_options,
                                         key=f"choice_{idx}",
                                         index=default_choice,
+                                        on_change=on_choice_change,
+                                        args=(idx, matches),
                                         label_visibility="collapsed"
                                     )
-                                    st.session_state.user_selections[idx] = {
-                                        'choice': final_choice,
-                                        'manual': manual_selection if manual_selection != 'None' else None,
-                                        'fuzzy': matches['fuzzy'],
-                                        'llm': matches['llm']
-                                    }
+                                    # NOTE: Removed unconditional session_state write - now handled by callback
                                 st.divider()
                     st.markdown("### Mapping Summary")
                     total_items = len(st.session_state.mapping_results)
