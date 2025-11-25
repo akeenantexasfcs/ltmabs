@@ -291,6 +291,101 @@ if 'show_mapping' not in st.session_state:
     st.session_state.show_mapping = False
 if 'active_tab' not in st.session_state:
     st.session_state.active_tab = 0
+
+# Callback functions for widget state management (prevents feedback loops)
+def on_choice_change(idx, matches):
+    """Callback for choice selectbox changes - updates session state only when widget actually changes"""
+    choice_key = f"choice_{idx}"
+    manual_key = f"manual_{idx}"
+    choice = st.session_state.get(choice_key, 'Select...')
+    manual = st.session_state.get(manual_key, 'None')
+    st.session_state.user_selections[idx] = {
+        'choice': choice,
+        'manual': manual if manual != 'None' else None,
+        'fuzzy': matches['fuzzy'],
+        'llm': matches['llm']
+    }
+
+def on_manual_change(idx, matches):
+    """Callback for manual selectbox changes - updates session state only when widget actually changes"""
+    manual_key = f"manual_{idx}"
+    choice_key = f"choice_{idx}"
+    manual = st.session_state.get(manual_key, 'None')
+    choice = st.session_state.get(choice_key, 'Select...')
+    # If manual selection is made, auto-switch to Manual Override
+    if manual != 'None':
+        st.session_state.user_selections[idx] = {
+            'choice': 'Manual Override',
+            'manual': manual,
+            'fuzzy': matches['fuzzy'],
+            'llm': matches['llm']
+        }
+        # Update the choice widget key to reflect Manual Override
+        st.session_state[choice_key] = 'Manual Override'
+    else:
+        st.session_state.user_selections[idx] = {
+            'choice': choice,
+            'manual': None,
+            'fuzzy': matches['fuzzy'],
+            'llm': matches['llm']
+        }
+
+def initialize_user_selections(mapping_results, high_confidence_threshold, fuzzy_threshold):
+    """Pre-initialize all user selections before rendering to prevent jitter on first interaction"""
+    if not mapping_results:
+        return
+    for result in mapping_results:
+        idx = result['index']
+        if idx not in st.session_state.user_selections:
+            matches = result['matches']
+            # Calculate default choice based on confidence scores
+            if matches['fuzzy'] and matches['fuzzy']['score'] >= high_confidence_threshold:
+                default_choice = f"Fuzzy ({matches['fuzzy']['score']}%)"
+            elif matches['llm'] and 'error' not in matches['llm']:
+                default_choice = "AI Match"
+            elif matches['fuzzy'] and matches['fuzzy']['score'] >= fuzzy_threshold:
+                default_choice = f"Fuzzy ({matches['fuzzy']['score']}%)"
+            else:
+                default_choice = "Select..."
+
+            st.session_state.user_selections[idx] = {
+                'choice': default_choice,
+                'manual': None,
+                'fuzzy': matches['fuzzy'],
+                'llm': matches['llm']
+            }
+
+# Callback functions for PDF page selection (prevents counter lag)
+def on_page_checkbox_change(file_name, page_num, file_idx):
+    """Callback when individual page checkbox changes - updates state immediately"""
+    checkbox_key = f"page_{file_idx}_{page_num}"
+    is_selected = st.session_state.get(checkbox_key, False)
+
+    if file_name not in st.session_state.selected_pages:
+        st.session_state.selected_pages[file_name] = []
+
+    if is_selected:
+        if page_num not in st.session_state.selected_pages[file_name]:
+            st.session_state.selected_pages[file_name].append(page_num)
+            st.session_state.selected_pages[file_name].sort()
+    else:
+        if page_num in st.session_state.selected_pages[file_name]:
+            st.session_state.selected_pages[file_name].remove(page_num)
+
+def select_all_pages(file_name, total_pages, file_idx):
+    """Select all pages for a file - callback for Select All button"""
+    st.session_state.selected_pages[file_name] = list(range(1, total_pages + 1))
+    # Also update individual checkbox states
+    for i in range(1, total_pages + 1):
+        st.session_state[f"page_{file_idx}_{i}"] = True
+
+def deselect_all_pages(file_name, total_pages, file_idx):
+    """Deselect all pages for a file - callback for Deselect All button"""
+    st.session_state.selected_pages[file_name] = []
+    # Also update individual checkbox states
+    for i in range(1, total_pages + 1):
+        st.session_state[f"page_{file_idx}_{i}"] = False
+
 @st.cache_data
 def get_stable_cache_key():
     """Generate a stable cache key for the current session."""
@@ -1458,18 +1553,24 @@ def main():
                              
                                 st.info(f"📄 Total pages: {len(images)}")
                              
-                                # Page selection controls
+                                # Page selection controls - using callbacks for immediate counter updates
                                 col1, col2, col3 = st.columns(3)
                                 with col1:
-                                    if st.button("☑️ Select All", key=f"select_all_{file_idx}"):
-                                        st.session_state.selected_pages[uploaded_file.name] = list(range(1, len(images) + 1))
-                                        st.rerun()
+                                    st.button(
+                                        "☑️ Select All",
+                                        key=f"select_all_{file_idx}",
+                                        on_click=select_all_pages,
+                                        args=(uploaded_file.name, len(images), file_idx)
+                                    )
                                 with col2:
-                                    if st.button("☐ Deselect All", key=f"deselect_all_{file_idx}"):
-                                        st.session_state.selected_pages[uploaded_file.name] = []
-                                        st.rerun()
+                                    st.button(
+                                        "☐ Deselect All",
+                                        key=f"deselect_all_{file_idx}",
+                                        on_click=deselect_all_pages,
+                                        args=(uploaded_file.name, len(images), file_idx)
+                                    )
                                 with col3:
-                                    # Calculate current selected count
+                                    # Counter reads from session_state - updates immediately via callbacks
                                     current_selected = st.session_state.selected_pages.get(uploaded_file.name, [])
                                     st.metric("Selected Pages", len(current_selected))
                              
@@ -1484,30 +1585,21 @@ def main():
                                         if idx < len(images):
                                             with cols[j]:
                                                 page_num = idx + 1
-                                             
-                                                # Get current selection state
+
+                                                # Get current selection state from session_state
                                                 current_selection = st.session_state.selected_pages.get(uploaded_file.name, [])
                                                 is_selected = page_num in current_selection
-                                             
-                                                # Checkbox for page selection
-                                                selected = st.checkbox(
+
+                                                # Checkbox with callback for immediate state updates
+                                                st.checkbox(
                                                     f"Page {page_num}",
                                                     value=is_selected,
-                                                    key=f"page_{file_idx}_{page_num}"
+                                                    key=f"page_{file_idx}_{page_num}",
+                                                    on_change=on_page_checkbox_change,
+                                                    args=(uploaded_file.name, page_num, file_idx)
                                                 )
-                                             
-                                                # Update selection immediately
-                                                if selected and not is_selected:
-                                                    if uploaded_file.name not in st.session_state.selected_pages:
-                                                        st.session_state.selected_pages[uploaded_file.name] = []
-                                                    if page_num not in st.session_state.selected_pages[uploaded_file.name]:
-                                                        st.session_state.selected_pages[uploaded_file.name].append(page_num)
-                                                        st.session_state.selected_pages[uploaded_file.name].sort()
-                                                elif not selected and is_selected:
-                                                    if uploaded_file.name in st.session_state.selected_pages:
-                                                        if page_num in st.session_state.selected_pages[uploaded_file.name]:
-                                                            st.session_state.selected_pages[uploaded_file.name].remove(page_num)
-                                             
+                                                # NOTE: Removed manual state update - now handled by callback
+
                                                 # Display page preview
                                                 st.image(
                                                     images[idx],
@@ -2609,6 +2701,8 @@ def main():
                             st.success("Marked low confidence items as unmapped!")
                             st.rerun()
                     st.divider()
+                    # Pre-initialize all user selections before rendering to prevent jitter
+                    initialize_user_selections(st.session_state.mapping_results, high_confidence_threshold, fuzzy_threshold)
                     results_by_label = {}
                     for result in st.session_state.mapping_results:
                         label = result['label']
@@ -2654,12 +2748,14 @@ def main():
                                         st.write(f"Match: {fuzzy['match']}")
                                         st.write(f"Score: {fuzzy['score']}%")
                                         st.write(f"Mnemonic: **{fuzzy['mnemonic']}**")
+                                        # Use stable placeholder to prevent layout reflow/jitter
+                                        confidence_placeholder = st.empty()
                                         if fuzzy['score'] >= high_confidence_threshold:
-                                            st.success("High confidence")
+                                            confidence_placeholder.success("High confidence")
                                         elif fuzzy['score'] >= fuzzy_threshold:
-                                            st.warning("Medium confidence")
+                                            confidence_placeholder.warning("Medium confidence")
                                         else:
-                                            st.error("Below threshold")
+                                            confidence_placeholder.error("Below threshold")
                                         if fuzzy['score'] < high_confidence_threshold and fuzzy['alternatives']:
                                             st.caption("Alternatives:")
                                             for alt in fuzzy['alternatives']:
@@ -2702,10 +2798,22 @@ def main():
                                             f"{row['ACCOUNT']} → {row['MNEMONIC']}"
                                             for _, row in label_mnemonics.iterrows()
                                         ]
-                                    manual_selection = st.selectbox(
+                                    # Get stored manual selection for default index
+                                    stored_manual = st.session_state.user_selections.get(idx, {}).get('manual', None)
+                                    manual_default_idx = 0
+                                    if stored_manual:
+                                        # Find the matching option in manual_options
+                                        for opt_idx, opt in enumerate(manual_options):
+                                            if stored_manual in opt or opt.startswith(stored_manual):
+                                                manual_default_idx = opt_idx
+                                                break
+                                    st.selectbox(
                                         "Select manually",
                                         options=manual_options,
                                         key=f"manual_{idx}",
+                                        index=manual_default_idx,
+                                        on_change=on_manual_change,
+                                        args=(idx, matches),
                                         label_visibility="collapsed"
                                     )
                                 with cols[3]:
@@ -2715,37 +2823,31 @@ def main():
                                         choice_options.append(f"Fuzzy ({matches['fuzzy']['score']}%)")
                                     if matches['llm'] and 'error' not in matches['llm']:
                                         choice_options.append("AI Match")
-                                 
+
                                     # FIX 1: Make manual override a permanent option
                                     choice_options.append("Manual Override")
-                                 
+
                                     choice_options.append("Leave Unmapped")
                                     choice_options.append("Skip/Remove")
-                                    default_choice = 0
-                                    if idx in st.session_state.user_selections:
-                                        prev_choice = st.session_state.user_selections[idx]['choice']
-                                        if prev_choice in choice_options:
-                                            default_choice = choice_options.index(prev_choice)
+
+                                    # Get stored choice from session state (already pre-initialized)
+                                    stored_choice = st.session_state.user_selections.get(idx, {}).get('choice', 'Select...')
+                                    if stored_choice in choice_options:
+                                        default_choice = choice_options.index(stored_choice)
                                     else:
-                                        if matches['fuzzy'] and matches['fuzzy']['score'] >= high_confidence_threshold:
-                                            default_choice = 1
-                                        elif matches['llm'] and 'error' not in matches['llm']:
-                                            default_choice = 2 if "AI Match" in choice_options else default_choice
-                                        elif matches['fuzzy'] and matches['fuzzy']['score'] >= fuzzy_threshold:
-                                            default_choice = 1
-                                    final_choice = st.selectbox(
+                                        default_choice = 0
+
+                                    # Use callback to update session state only when widget changes
+                                    st.selectbox(
                                         "Choose mapping",
                                         options=choice_options,
                                         key=f"choice_{idx}",
                                         index=default_choice,
+                                        on_change=on_choice_change,
+                                        args=(idx, matches),
                                         label_visibility="collapsed"
                                     )
-                                    st.session_state.user_selections[idx] = {
-                                        'choice': final_choice,
-                                        'manual': manual_selection if manual_selection != 'None' else None,
-                                        'fuzzy': matches['fuzzy'],
-                                        'llm': matches['llm']
-                                    }
+                                    # NOTE: Removed unconditional session_state write - now handled by callback
                                 st.divider()
                     st.markdown("### Mapping Summary")
                     total_items = len(st.session_state.mapping_results)
