@@ -355,6 +355,37 @@ def initialize_user_selections(mapping_results, high_confidence_threshold, fuzzy
                 'llm': matches['llm']
             }
 
+# Callback functions for PDF page selection (prevents counter lag)
+def on_page_checkbox_change(file_name, page_num, file_idx):
+    """Callback when individual page checkbox changes - updates state immediately"""
+    checkbox_key = f"page_{file_idx}_{page_num}"
+    is_selected = st.session_state.get(checkbox_key, False)
+
+    if file_name not in st.session_state.selected_pages:
+        st.session_state.selected_pages[file_name] = []
+
+    if is_selected:
+        if page_num not in st.session_state.selected_pages[file_name]:
+            st.session_state.selected_pages[file_name].append(page_num)
+            st.session_state.selected_pages[file_name].sort()
+    else:
+        if page_num in st.session_state.selected_pages[file_name]:
+            st.session_state.selected_pages[file_name].remove(page_num)
+
+def select_all_pages(file_name, total_pages, file_idx):
+    """Select all pages for a file - callback for Select All button"""
+    st.session_state.selected_pages[file_name] = list(range(1, total_pages + 1))
+    # Also update individual checkbox states
+    for i in range(1, total_pages + 1):
+        st.session_state[f"page_{file_idx}_{i}"] = True
+
+def deselect_all_pages(file_name, total_pages, file_idx):
+    """Deselect all pages for a file - callback for Deselect All button"""
+    st.session_state.selected_pages[file_name] = []
+    # Also update individual checkbox states
+    for i in range(1, total_pages + 1):
+        st.session_state[f"page_{file_idx}_{i}"] = False
+
 @st.cache_data
 def get_stable_cache_key():
     """Generate a stable cache key for the current session."""
@@ -1522,18 +1553,24 @@ def main():
                              
                                 st.info(f"📄 Total pages: {len(images)}")
                              
-                                # Page selection controls
+                                # Page selection controls - using callbacks for immediate counter updates
                                 col1, col2, col3 = st.columns(3)
                                 with col1:
-                                    if st.button("☑️ Select All", key=f"select_all_{file_idx}"):
-                                        st.session_state.selected_pages[uploaded_file.name] = list(range(1, len(images) + 1))
-                                        st.rerun()
+                                    st.button(
+                                        "☑️ Select All",
+                                        key=f"select_all_{file_idx}",
+                                        on_click=select_all_pages,
+                                        args=(uploaded_file.name, len(images), file_idx)
+                                    )
                                 with col2:
-                                    if st.button("☐ Deselect All", key=f"deselect_all_{file_idx}"):
-                                        st.session_state.selected_pages[uploaded_file.name] = []
-                                        st.rerun()
+                                    st.button(
+                                        "☐ Deselect All",
+                                        key=f"deselect_all_{file_idx}",
+                                        on_click=deselect_all_pages,
+                                        args=(uploaded_file.name, len(images), file_idx)
+                                    )
                                 with col3:
-                                    # Calculate current selected count
+                                    # Counter reads from session_state - updates immediately via callbacks
                                     current_selected = st.session_state.selected_pages.get(uploaded_file.name, [])
                                     st.metric("Selected Pages", len(current_selected))
                              
@@ -1548,30 +1585,21 @@ def main():
                                         if idx < len(images):
                                             with cols[j]:
                                                 page_num = idx + 1
-                                             
-                                                # Get current selection state
+
+                                                # Get current selection state from session_state
                                                 current_selection = st.session_state.selected_pages.get(uploaded_file.name, [])
                                                 is_selected = page_num in current_selection
-                                             
-                                                # Checkbox for page selection
-                                                selected = st.checkbox(
+
+                                                # Checkbox with callback for immediate state updates
+                                                st.checkbox(
                                                     f"Page {page_num}",
                                                     value=is_selected,
-                                                    key=f"page_{file_idx}_{page_num}"
+                                                    key=f"page_{file_idx}_{page_num}",
+                                                    on_change=on_page_checkbox_change,
+                                                    args=(uploaded_file.name, page_num, file_idx)
                                                 )
-                                             
-                                                # Update selection immediately
-                                                if selected and not is_selected:
-                                                    if uploaded_file.name not in st.session_state.selected_pages:
-                                                        st.session_state.selected_pages[uploaded_file.name] = []
-                                                    if page_num not in st.session_state.selected_pages[uploaded_file.name]:
-                                                        st.session_state.selected_pages[uploaded_file.name].append(page_num)
-                                                        st.session_state.selected_pages[uploaded_file.name].sort()
-                                                elif not selected and is_selected:
-                                                    if uploaded_file.name in st.session_state.selected_pages:
-                                                        if page_num in st.session_state.selected_pages[uploaded_file.name]:
-                                                            st.session_state.selected_pages[uploaded_file.name].remove(page_num)
-                                             
+                                                # NOTE: Removed manual state update - now handled by callback
+
                                                 # Display page preview
                                                 st.image(
                                                     images[idx],
